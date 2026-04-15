@@ -1,0 +1,780 @@
+---
+title: "Figures_Pearson_Version"
+output: html_notebook
+---
+
+```{r}y
+library(dplyr)
+library(ggplot2)
+```
+
+Baseline Covariates By Site
+
+```{r}
+# Loading in data
+rbc <- read.csv("/media/disk2/RBC_version0.1/regional_GMV_all_sites_harmonized_covariates.csv")
+# Reading in the structural data
+func <- read.csv("/media/disk2/RBC_version0.1/FC_network17_harmonized_covariates.csv")
+# Setting each dataset to only include patients that overlap 
+rbc = rbc[rbc$participant_id %in% func$participant_id,]
+func = func[func$participant_id %in% rbc$participant_id,]
+# Sanity check
+sum(rbc$participant_id == func$participant_id) == nrow(func)
+# Merging datasets
+cols_to_add <- setdiff(names(func), names(rbc))
+both <- dplyr::inner_join(rbc, func[, c("participant_id", cols_to_add)], by = "participant_id")
+# Changing sex to a binary - Male = 1; Female = 0
+both = both %>% mutate(sex = ifelse(sex == "Male", 1, 0))
+# Loading in functions
+# Loading in functions
+source("/media/disk2/multivariateBWAS/code_for_review/build_funcs.R")
+# Sourcing influence and correlation functions
+source("/media/disk2/multivariateBWAS/code_for_review/influence_funcs.R")
+source("/media/disk2/multivariateBWAS/code_for_review/corr_funcs.R")
+
+# Loading in color palette
+cbbPalette <- c("#000000","#E69F00","#56B4E9","#009E73",
+                "#F0E442","#0072B2","#D55E00","#CC79A7")
+```
+
+```{r}
+sd_age_by_site <- both %>%
+  group_by(study_site) %>%
+  summarise(age_sd = sd(age, na.rm = TRUE),
+            Sample_Size = n())
+sd_age_by_site
+```
+```{r}
+library(gtsummary)
+library(dplyr)
+theme_gtsummary_journal("jama") 
+table1_data <- both %>%
+  select(study_site, age, 
+         p_factor_mcelroy_harmonized_all_samples,
+         sex, euler, meanFD) %>%
+  mutate(
+    sex = factor(sex, levels = c(0, 1), labels = c("Female", "Male")),
+  )
+tbl1 <- table1_data %>%
+  tbl_summary(
+    by = study_site,
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    label = list(
+      age ~ "Age",
+      p_factor_mcelroy_harmonized_all_samples ~ "P-factor",
+      sex ~ "Sex",
+      euler ~ "Euler number",
+      meanFD ~ "Mean FD"
+    ),
+    missing = "ifany"
+  ) %>%
+  add_n() %>%
+  add_overall() %>%
+  add_p() %>%
+  modify_header(label ~ "**Variable**") %>%
+  bold_labels()
+
+tbl1
+```
+```{r}
+library(flextable)
+
+tbl1 %>%
+  as_flex_table() %>%
+  save_as_docx(path = "Table1_for_paper.docx")
+```
+
+Site Heterogeneity: Ridge Regression
+
+```{r}
+Ridge_raw_results <- readRDS("/home/guanru/meta/all_raw_splits_age_ridge.rds")
+RF_raw_results <-readRDS("/home/guanru/meta/RF/RF_sites_results.RDS")
+```
+
+```{r}
+library(reshape2)
+plot_data <- melt(Ridge_raw_results, id.vars = c("Site", "split_num"), 
+                   measure.vars = c("Local_Pearson", "Multi_Down_Pearson", "Multi_Full_Pearson"))
+ ggplot(plot_data, aes(x = Site, y = value, fill = variable)) +
+   geom_boxplot() +
+   theme_minimal() +
+   labs(title = "Site Specific Pearson-estimates over 100 splits,Ridge Regression", y = "Pearson Correlation", fill = "Model Type") +
+   scale_fill_manual(values = c("Local_Pearson"="#F8766D", "Multi_Down_Pearson"="#00BA38", "Multi_Full_Pearson"="#619CFF"))
+```
+
+```{r}
+library(reshape2)
+plot_data <- melt(RF_raw_results, id.vars = c("Site", "split_num"), 
+                   measure.vars = c("Local_Pearson", "Multi_Down_Pearson", "Multi_Full_Pearson"))
+ ggplot(plot_data, aes(x = Site, y = value, fill = variable)) +
+   geom_boxplot() +
+   theme_minimal() +
+   labs(title = "Site Specific Pearson-estimates over 100 splits,Random Forest", y = "Pearson Correlation", fill = "Model Type") +
+   scale_fill_manual(values = c("Local_Pearson"="#F8766D", "Multi_Down_Pearson"="#00BA38", "Multi_Full_Pearson"="#619CFF"))
+```
+
+Meta-Analysis
+
+```{r}
+# Summary Results By Site
+final_summary_table_Ridge <- readRDS("/home/guanru/meta/final_summary_table_p.rds")
+final_summary_table_RF <- readRDS("/home/guanru/meta/RF/RF_sites_summary.RDS")
+final_summary_table_Ridge$Sample_Size <- sd_age_by_site$Sample_Size
+final_summary_table_RF$Sample_Size <- sd_age_by_site$Sample_Size
+```
+
+```{r}
+library(meta)
+
+m_local <- metacor(cor = Median_Local_Pearson,      
+                   n = Sample_Size,                 
+                   studlab = Target_Site,
+                   data = final_summary_table_Ridge,    
+                   sm = "ZCOR",                    
+                   fixed = TRUE,
+                   random = TRUE,
+                   method.tau = "REML",
+                   prediction = TRUE)
+
+summary(m_local)
+#forest(m_local,
+#       leftcols = c("studlab", "TE", "seTE"),
+#       leftlabs = c("Study", "theta", "SE(theta)"),
+#       rightcols = c("effect", "ci", "w.fixed", "w.random"),
+#      rightlabs = c("theta", "95%-CI", "Weight\n(common)", "Weight\n(random)"),
+#      col.predict = "red",
+#       print.tau2 = TRUE,
+#     print.I2 = TRUE,
+#       print.pval.Q = TRUE,
+#      digits = 4,
+#       digits.se = 4)
+
+
+m_ds <- metacor(cor = Median_Multi_Down_Pearson,      
+                   n = Sample_Size,                 
+                   studlab = Target_Site,
+                   data = final_summary_table_Ridge,    
+                   sm = "ZCOR",                    
+                   fixed = TRUE,
+                   random = TRUE,
+                   method.tau = "REML",
+                   prediction = TRUE)
+
+m_full <- metacor(cor = Median_Multi_Full_Pearson,      
+                   n = Sample_Size,                 
+                   studlab = Target_Site,
+                   data = final_summary_table_Ridge,    
+                   sm = "ZCOR",                    
+                   fixed = TRUE,
+                   random = TRUE,
+                   method.tau = "REML",
+                   prediction = TRUE)
+library(dplyr)
+
+extract_meta_results_p <- function(m_obj, method_name) {
+  back_trans <- function(z) {
+    return(tanh(z)) 
+  }
+  data.frame(
+    Method = method_name,
+    fixed_model_z  = m_obj$TE.common, 
+    random_model_z = m_obj$TE.random,
+    `I^2` = sprintf("%.2f%%", m_obj$I2 * 100), 
+    Tau2  = m_obj$tau2,
+    pooled_r_random      = back_trans(m_obj$TE.random), 
+    CI_95_Lower_r_random = back_trans(m_obj$lower.random),
+    CI_95_Upper_r_random = back_trans(m_obj$upper.random),
+    pooled_r_fixed       = back_trans(m_obj$TE.common),
+    CI_95_Lower_r_fixed  = back_trans(m_obj$lower.common),
+    CI_95_Upper_r_fixed  = back_trans(m_obj$upper.common),
+    check.names = FALSE 
+  )
+}
+
+harmonized_meta_analysis_Ridge_Reg_pearson <- bind_rows(
+  extract_meta_results_p(m_full, "multi_full"),
+  extract_meta_results_p(m_ds, "multi_downsample"),
+  extract_meta_results_p(m_local, "local")
+)
+harmonized_meta_analysis_Ridge_Reg_pearson
+```
+
+```{r}
+m_local <- metacor(cor = Median_Local_Pearson,      
+                   n = Sample_Size,                 
+                   studlab = Target_Site,
+                   data = final_summary_table_RF,    
+                   sm = "ZCOR",                    
+                   fixed = TRUE,
+                   random = TRUE,
+                   method.tau = "REML",
+                   prediction = TRUE)
+
+summary(m_local)
+#forest(m_local,
+#       leftcols = c("studlab", "TE", "seTE"),
+#       leftlabs = c("Study", "theta", "SE(theta)"),
+#       rightcols = c("effect", "ci", "w.fixed", "w.random"),
+#      rightlabs = c("theta", "95%-CI", "Weight\n(common)", "Weight\n(random)"),
+#      col.predict = "red",
+#       print.tau2 = TRUE,
+#     print.I2 = TRUE,
+#       print.pval.Q = TRUE,
+#      digits = 4,
+#       digits.se = 4)
+
+m_ds <- metacor(cor = Median_Multi_Down_Pearson,      
+                   n = Sample_Size,                 
+                   studlab = Target_Site,
+                   data = final_summary_table_RF,    
+                   sm = "ZCOR",                    
+                   fixed = TRUE,
+                   random = TRUE,
+                   method.tau = "REML",
+                   prediction = TRUE)
+
+m_full <- metacor(cor = Median_Multi_Full_Pearson,      
+                   n = Sample_Size,                 
+                   studlab = Target_Site,
+                   data = final_summary_table_RF,    
+                   sm = "ZCOR",                    
+                   fixed = TRUE,
+                   random = TRUE,
+                   method.tau = "REML",
+                   prediction = TRUE)
+library(dplyr)
+
+extract_meta_results_p <- function(m_obj, method_name) {
+  back_trans <- function(z) {
+    return(tanh(z)) 
+  }
+  data.frame(
+    Method = method_name,
+    fixed_model_z  = m_obj$TE.common, 
+    random_model_z = m_obj$TE.random,
+    `I^2` = sprintf("%.2f%%", m_obj$I2 * 100), 
+    Tau2  = m_obj$tau2,
+    pooled_r_random      = back_trans(m_obj$TE.random), 
+    CI_95_Lower_r_random = back_trans(m_obj$lower.random),
+    CI_95_Upper_r_random = back_trans(m_obj$upper.random),
+    pooled_r_fixed       = back_trans(m_obj$TE.common),
+    CI_95_Lower_r_fixed  = back_trans(m_obj$lower.common),
+    CI_95_Upper_r_fixed  = back_trans(m_obj$upper.common),
+    check.names = FALSE 
+  )
+}
+
+harmonized_meta_analysis_RF_pearson <- bind_rows(
+  extract_meta_results_p(m_full, "multi_full"),
+  extract_meta_results_p(m_ds, "multi_downsample"),
+  extract_meta_results_p(m_local, "local")
+)
+harmonized_meta_analysis_RF_pearson
+```
+
+Overall Effect
+
+```{r}
+age_ridge_overall<-readRDS("~/meta/age_ridge_overall.rds")
+age_ridge_overall <- subset(subset(age_ridge_overall,stat=="Pearson"),label=="Both")
+age_ridge_overall
+age_RF_overall<-readRDS("~/meta/RF/age_analysis_RF.rds")
+age_RF_overall <- subset(subset(age_RF_overall,stat=="Pearson"),label=="Both")
+age_RF_overall
+```
+
+Full Figure One
+
+1.  Ridge Regression
+
+```{r}
+rg_est   <- age_ridge_overall$estimates
+rg_lower <- age_ridge_overall$lower_bounds
+rg_upper <- age_ridge_overall$upper_bounds
+
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+
+pooled_long <- harmonized_meta_analysis_Ridge_Reg_pearson %>%
+  mutate(
+    variable = case_when(
+      Method == "local"            ~ "Local_Pearson",
+      Method == "multi_downsample" ~ "Multi_Down_Pearson",
+      Method == "multi_full"       ~ "Multi_Full_Pearson"
+    ),
+    variable = factor(variable, levels = c("Local_Pearson", "Multi_Down_Pearson", "Multi_Full_Pearson"))
+  ) %>%
+
+  select(variable,
+         RE_est   = pooled_r_random,
+         RE_lower = CI_95_Lower_r_random,
+         RE_upper = CI_95_Upper_r_random,
+         FE_est   = pooled_r_fixed,
+         FE_lower = CI_95_Lower_r_fixed,
+         FE_upper = CI_95_Upper_r_fixed) %>%
+  tidyr::pivot_longer(
+    cols = c(RE_est, RE_lower, RE_upper, FE_est, FE_lower, FE_upper),
+    names_to = c("effect_type", ".value"),
+    names_pattern = "(RE|FE)_(.*)"
+  ) %>%
+  mutate(
+    effect_type = factor(effect_type, levels = c("RE", "FE")),
+
+    x_dodge = as.numeric(variable) + ifelse(effect_type == "RE", -0.15, 0.15)
+  )
+
+y_range <- range(c(plot_data$value,
+                   pooled_long$lower,
+                   pooled_long$upper), na.rm = TRUE)
+
+p_left <- ggplot(pooled_long,
+                 aes(x = x_dodge, y = est, color = variable,
+                     shape = effect_type, linetype = effect_type)) +
+  geom_linerange(aes(ymin = lower, ymax = upper), linewidth = 1.1) +
+  geom_point(aes(fill = variable), size = 4) +
+  scale_color_manual(
+    name = "Model type",
+    values = c(
+      "Local_Pearson"      = "#F8766D",
+      "Multi_Down_Pearson" = "#00BA38",
+      "Multi_Full_Pearson" = "#619CFF"
+    )
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Local_Pearson"      = "#F8766D",
+      "Multi_Down_Pearson" = "#00BA38",
+      "Multi_Full_Pearson" = "#619CFF"
+    ),
+    guide = "none"
+  ) +
+  scale_shape_manual(
+    name   = "Effect model",
+    values = c("RE" = 18, "FE" = 21),   
+    labels = c("RE" = "Random effect", "FE" = "Fixed effect")
+  ) +
+  scale_linetype_manual(
+    name   = "Effect model",
+    values = c("RE" = "solid", "FE" = "dashed"),
+    labels = c("RE" = "Random effect", "FE" = "Fixed effect")
+  ) +
+  scale_x_continuous(
+    breaks = 1:3,
+    labels = c("Local", "Multi\nDown", "Multi\nFull")
+  ) +
+  ylim(y_range) +
+  labs(title = "Pooled", x = NULL, y = "Correlation (Pearson)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 9, hjust = 0.5),
+    axis.text.x = element_text(size = 8)
+  )
+
+p_right <- ggplot(plot_data, aes(x = Site, y = value, fill = variable)) +
+  geom_boxplot(outlier.size = 0.8, alpha = 0.85) +
+  ylim(y_range) +
+  scale_fill_manual(values = c(
+    "Local_Pearson"      = "#F8766D",
+    "Multi_Down_Pearson" = "#00BA38",
+    "Multi_Full_Pearson" = "#619CFF"
+  )) +
+  labs(
+    title = "Site-specific Pearson estimates over 100 splits, Ridge Regression",
+    x = "Site", y = NULL,
+    fill = "Model type"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position  = "none",
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    axis.text.y      = element_blank(),
+    axis.ticks.y     = element_blank()
+  )
+plot_grid(
+  p_left, p_right,
+  ncol       = 2,
+  rel_widths = c(1.2, 4),
+  align      = "h",
+  axis       = "tb"
+)
+```
+
+```{r}
+rg_est   <- age_ridge_overall$estimates
+rg_lower <- age_ridge_overall$lower_bounds
+rg_upper <- age_ridge_overall$upper_bounds
+
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+
+pooled_long <- harmonized_meta_analysis_Ridge_Reg_pearson %>%
+  mutate(
+    variable = case_when(
+      Method == "local"            ~ "Local_Pearson",
+      Method == "multi_downsample" ~ "Multi_Down_Pearson",
+      Method == "multi_full"       ~ "Multi_Full_Pearson"
+    ),
+    variable = factor(variable, levels = c("Local_Pearson", "Multi_Down_Pearson", "Multi_Full_Pearson"))
+  ) %>%
+  select(variable,
+         RE_est   = pooled_r_random,
+         RE_lower = CI_95_Lower_r_random,
+         RE_upper = CI_95_Upper_r_random,
+         FE_est   = pooled_r_fixed,
+         FE_lower = CI_95_Lower_r_fixed,
+         FE_upper = CI_95_Upper_r_fixed) %>%
+  tidyr::pivot_longer(
+    cols = c(RE_est, RE_lower, RE_upper, FE_est, FE_lower, FE_upper),
+    names_to = c("effect_type", ".value"),
+    names_pattern = "(RE|FE)_(.*)"
+  ) %>%
+  mutate(
+    effect_type = factor(effect_type, levels = c("RE", "FE")),
+    x_dodge = as.numeric(variable) + ifelse(effect_type == "RE", -0.15, 0.15)
+  )
+
+y_range <- range(c(plot_data$value,
+                   pooled_long$lower,
+                   pooled_long$upper,
+                   rg_est), na.rm = TRUE)
+
+overall_label <- paste0("Overall r = ", round(rg_est, 3))
+
+p_left <- ggplot(pooled_long,
+                 aes(x = x_dodge, y = est, color = variable,
+                     shape = effect_type, linetype = effect_type)) +
+  geom_linerange(aes(ymin = lower, ymax = upper), linewidth = 1.1) +
+ geom_point(data = subset(pooled_long, effect_type == "RE"),
+           aes(fill = variable), size = 2.5, stroke = 0.8) +
+geom_point(data = subset(pooled_long, effect_type == "FE"),
+           aes(fill = variable), size = 1.0, stroke = 0.8) +geom_hline(yintercept = rg_est, linetype = "longdash",
+             color = "black", linewidth = 0.8) +
+  scale_color_manual(
+    name = "Model type",
+    values = c(
+      "Local_Pearson"      = "#F8766D",
+      "Multi_Down_Pearson" = "#00BA38",
+      "Multi_Full_Pearson" = "#619CFF"
+    )
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Local_Pearson"      = "#F8766D",
+      "Multi_Down_Pearson" = "#00BA38",
+      "Multi_Full_Pearson" = "#619CFF"
+    ),
+    guide = "none"
+  ) +
+  scale_shape_manual(
+    name   = "Effect model",
+    values = c("RE" = 18, "FE" = 21),
+    breaks = c("RE", "FE"),
+    labels = c("RE" = "Random effect", "FE" = "Fixed effect")
+  ) +
+  scale_linetype_manual(
+    name   = "Effect model",
+    values = c("RE" = "solid", "FE" = "dashed"),
+    breaks = c("RE", "FE"),
+    labels = c("RE" = "Random effect", "FE" = "Fixed effect")
+  ) +
+  scale_x_continuous(
+    breaks = 1:3,
+    labels = c("Local", "Multi\nDown", "Multi\nFull")
+  ) +
+  coord_cartesian(ylim = y_range) +
+  labs(title = "Pooled", x = NULL, y = "Correlation (Pearson)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 9, hjust = 0.5),
+    axis.text.x = element_text(size = 8)
+  ) +
+  guides(
+   
+    shape = guide_legend(
+      order        = 1,
+      override.aes = list(
+        size     = 3,
+        linetype = c("solid", "dashed"),
+        shape    = c(18, 21)
+      )
+    ),
+    linetype = "none",
+    color    = guide_legend(order = 2)
+  )
+
+p_right <- ggplot(plot_data, aes(x = Site, y = value, fill = variable)) +
+  geom_boxplot(outlier.size = 0.8, alpha = 0.85) +
+  geom_hline(yintercept = rg_est, linetype = "longdash",
+             color = "black", linewidth = 0.8) +
+  annotate("text", x = Inf, y = rg_est,
+           label = overall_label,
+           hjust = 1.05, vjust = -0.5, size = 3, color = "black") +
+  coord_cartesian(ylim = y_range) +
+  scale_fill_manual(values = c(
+    "Local_Pearson"      = "#F8766D",
+    "Multi_Down_Pearson" = "#00BA38",
+    "Multi_Full_Pearson" = "#619CFF"
+  )) +
+  labs(
+    title = "Site-specific Pearson estimates over 100 splits, Ridge Regression",
+    x = "Site", y = NULL,
+    fill = "Model type"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position  = "none",
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    axis.text.y      = element_blank(),
+    axis.ticks.y     = element_blank()
+  )
+
+plot_grid(
+  p_left, p_right,
+  ncol       = 2,
+  rel_widths = c(1.2, 4),
+  align      = "h",
+  axis       = "tb"
+)
+```
+
+```{r}
+rf_est   <- age_RF_overall$estimates
+rf_lower <- age_RF_overall$lower_bounds
+rf_upper <- age_RF_overall$upper_bounds
+
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+
+pooled_long <- harmonized_meta_analysis_RF_pearson %>%
+  mutate(
+    variable = case_when(
+      Method == "local"            ~ "Local_Pearson",
+      Method == "multi_downsample" ~ "Multi_Down_Pearson",
+      Method == "multi_full"       ~ "Multi_Full_Pearson"
+    ),
+    variable = factor(variable, levels = c("Local_Pearson", "Multi_Down_Pearson", "Multi_Full_Pearson"))
+  ) %>%
+  select(variable,
+         RE_est   = pooled_r_random,
+         RE_lower = CI_95_Lower_r_random,
+         RE_upper = CI_95_Upper_r_random,
+         FE_est   = pooled_r_fixed,
+         FE_lower = CI_95_Lower_r_fixed,
+         FE_upper = CI_95_Upper_r_fixed) %>%
+  tidyr::pivot_longer(
+    cols = c(RE_est, RE_lower, RE_upper, FE_est, FE_lower, FE_upper),
+    names_to = c("effect_type", ".value"),
+    names_pattern = "(RE|FE)_(.*)"
+  ) %>%
+  mutate(
+    effect_type = factor(effect_type, levels = c("RE", "FE")),
+    x_dodge = as.numeric(variable) + ifelse(effect_type == "RE", -0.15, 0.15)
+  )
+
+y_range <- range(c(plot_data$value,
+                   pooled_long$lower,
+                   pooled_long$upper,
+                   rf_est), na.rm = TRUE)
+
+overall_label <- paste0("Overall r = ", round(rf_est, 3))
+
+p_left <- ggplot(pooled_long,
+                 aes(x = x_dodge, y = est, color = variable,
+                     shape = effect_type, linetype = effect_type)) +
+  geom_linerange(aes(ymin = lower, ymax = upper), linewidth = 1.1) +
+ geom_point(data = subset(pooled_long, effect_type == "RE"),
+           aes(fill = variable), size = 2.5, stroke = 0.8) +
+geom_point(data = subset(pooled_long, effect_type == "FE"),
+           aes(fill = variable), size = 1.0, stroke = 0.8)+
+  geom_hline(yintercept = rf_est, linetype = "longdash",
+             color = "black", linewidth = 0.8) +
+  scale_color_manual(
+    name = "Model type",
+    values = c(
+      "Local_Pearson"      = "#F8766D",
+      "Multi_Down_Pearson" = "#00BA38",
+      "Multi_Full_Pearson" = "#619CFF"
+    )
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Local_Pearson"      = "#F8766D",
+      "Multi_Down_Pearson" = "#00BA38",
+      "Multi_Full_Pearson" = "#619CFF"
+    ),
+    guide = "none"
+  ) +
+  scale_shape_manual(
+    name   = "Effect model",
+    values = c("RE" = 18, "FE" = 21),
+    breaks = c("RE", "FE"),
+    labels = c("RE" = "Random effect", "FE" = "Fixed effect")
+  ) +
+  scale_linetype_manual(
+    name   = "Effect model",
+    values = c("RE" = "solid", "FE" = "dashed"),
+    breaks = c("RE", "FE"),
+    labels = c("RE" = "Random effect", "FE" = "Fixed effect")
+  ) +
+  scale_x_continuous(
+    breaks = 1:3,
+    labels = c("Local", "Multi\nDown", "Multi\nFull")
+  ) +
+  coord_cartesian(ylim = y_range) +
+  labs(title = "Pooled", x = NULL, y = "Correlation (Pearson)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 9, hjust = 0.5),
+    axis.text.x = element_text(size = 8)
+  ) +
+  guides(
+    shape = guide_legend(
+      order        = 1,
+      override.aes = list(
+        size     = 3,
+        linetype = c("solid", "dashed"),
+        shape    = c(18, 21)
+      )
+    ),
+    linetype = "none",
+    color    = guide_legend(order = 2)
+  )
+
+p_right <- ggplot(plot_data, aes(x = Site, y = value, fill = variable)) +
+  geom_boxplot(outlier.size = 0.8, alpha = 0.85) +
+  geom_hline(yintercept = rf_est, linetype = "longdash",
+             color = "black", linewidth = 0.8) +
+  annotate("text", x = Inf, y = rf_est,
+           label = overall_label,
+           hjust = 1.05, vjust = -0.5, size = 3, color = "black") +
+  coord_cartesian(ylim = y_range) +
+  scale_fill_manual(values = c(
+    "Local_Pearson"      = "#F8766D",
+    "Multi_Down_Pearson" = "#00BA38",
+    "Multi_Full_Pearson" = "#619CFF"
+  )) +
+  labs(
+    title = "Site-specific Pearson estimates over 100 splits, Random Forest",
+    x = "Site", y = NULL,
+    fill = "Model type"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position  = "none",
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    axis.text.y      = element_blank(),
+    axis.ticks.y     = element_blank()
+  )
+
+plot_grid(
+  p_left, p_right,
+  ncol       = 2,
+  rel_widths = c(1.2, 4),
+  align      = "h",
+  axis       = "tb"
+)
+```
+
+Fig 3 : Sample Size,Tr(Covariance(X)),sd(Age) vs Pearson estimates,
+
+```{r}
+sd_age_by_site
+                          
+```
+
+```{r}
+final_summary_table_Ridge
+final_summary_table_RF
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+both_cols   <- colnames(both)[grepl("X17|_to_", colnames(both))] 
+compute_trace_cov_by_site <- function(data, cov_cols, site_col = "study_site") {
+  sites <- unique(data[[site_col]])
+  results <- sapply(sites, function(s) {
+    X <- data.matrix(data[data[[site_col]] == s, cov_cols])
+    X <- X[complete.cases(X), ]
+    if (nrow(X) < 2) return(NA)
+    sum(diag(cov(X)))
+  })
+  data.frame(site = sites, trace_cov = results,
+             n_cols = length(cov_cols), row.names = NULL)
+}
+
+trace_both   <- compute_trace_cov_by_site(both, both_cols)     # Both
+
+merged_ridge <- final_summary_table_Ridge %>%
+  left_join(sd_age_by_site, by = c("Target_Site" = "study_site"))
+merged_ridge <- merged_ridge %>%
+  left_join(trace_both, by = c("Target_Site" = "site"))
+
+# sd(age) vs Local Pearson
+p1 <- ggplot(merged_ridge, aes(x = age_sd, y = Median_Local_Pearson)) +
+  geom_point(size = 3, color = "#F8766D", alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE, color = "#F8766D", fill = "#F8766D", alpha = 0.15, linewidth = 0.8) +
+  geom_text_repel(aes(label = Target_Site), size = 2.8, max.overlaps = 20) +
+  labs(x = "SD(age)", y = "Ridge Regression Median Pearson (Local)", title = "SD(age) vs Local Pearson") +
+  theme_minimal()
+
+# Sample_Size vs Local Pearson
+p2 <- ggplot(merged_ridge, aes(x = Sample_Size.y, y = Median_Local_Pearson)) +
+  geom_point(size = 3, color = "#F8766D", alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE, color = "#F8766D", fill = "#F8766D", alpha = 0.15, linewidth = 0.8) +
+  geom_text_repel(aes(label = Target_Site), size = 2.8, max.overlaps = 20) +
+  labs(x = "Sample Size", y = "Ridge Regression Median Pearson (Local)", title = "Sample Size vs Local Pearson") +
+  theme_minimal()
+
+# Sample_Size vs Local Pearson
+p3 <- ggplot(merged_ridge, aes(x = trace_cov, y = Median_Local_Pearson)) +
+  geom_point(size = 3, color = "#F8766D", alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE, color = "#F8766D", fill = "#F8766D", alpha = 0.15, linewidth = 0.8) +
+  geom_text_repel(aes(label = Target_Site), size = 2.8, max.overlaps = 20) +
+  labs(x = "Trace of Cov(X)", y = "Ridge Regression Median Pearson (Local)", title = "Trace(Cov(X)) vs Local Pearson") +
+  theme_minimal()
+
+cowplot::plot_grid(p1, p2,p3,ncol = 3)
+```
+
+Tr(Cov(X))
+
+```{r}
+merged_RF <- final_summary_table_RF %>%
+  left_join(sd_age_by_site, by = c("Target_Site" = "study_site"))
+merged_RF <- merged_RF %>%
+  left_join(trace_both, by = c("Target_Site" = "site"))
+
+# sd(age) vs Local Pearson
+p1 <- ggplot(merged_RF, aes(x = age_sd, y = Median_Local_Pearson)) +
+  geom_point(size = 3, color = "#F8766D", alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE, color = "#F8766D", fill = "#F8766D", alpha = 0.15, linewidth = 0.8) +
+  geom_text_repel(aes(label = Target_Site), size = 2.8, max.overlaps = 20) +
+  labs(x = "SD(age)", y = "Random Forest Median Pearson (Local)", title = "SD(age) vs Local Pearson") +
+  theme_minimal()
+
+# Sample_Size vs Local Pearson
+p2 <- ggplot(merged_RF, aes(x = Sample_Size.y, y = Median_Local_Pearson)) +
+  geom_point(size = 3, color = "#F8766D", alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE, color = "#F8766D", fill = "#F8766D", alpha = 0.15, linewidth = 0.8) +
+  geom_text_repel(aes(label = Target_Site), size = 2.8, max.overlaps = 20) +
+  labs(x = "Sample Size", y = "Random Forest Median Pearson (Local)", title = "Sample Size vs Local Pearson") +
+  theme_minimal()
+
+# Sample_Size vs Local Pearson
+p3 <- ggplot(merged_RF, aes(x = trace_cov, y = Median_Local_Pearson)) +
+  geom_point(size = 3, color = "#F8766D", alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE, color = "#F8766D", fill = "#F8766D", alpha = 0.15, linewidth = 0.8) +
+  geom_text_repel(aes(label = Target_Site), size = 2.8, max.overlaps = 20) +
+  labs(x = "Trace of Cov(X)", y = "Random Forest Median Pearson (Local)", title = "Trace(Cov(X)) vs Local Pearson") +
+  theme_minimal()
+
+cowplot::plot_grid(p1, p2,p3,ncol = 3)
+```
